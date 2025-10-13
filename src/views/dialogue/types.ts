@@ -61,6 +61,7 @@ export interface FlowType {
   display: boolean;
   progress: string;
   flowId?: string;
+  taskId?: string;
 }
 
 export interface FlowDataType {
@@ -101,6 +102,7 @@ export interface RobotConversationItem {
   metadata?: undefined | Metadata;
   flowdata?: FlowType | undefined;
   paramsList?: any;
+  document?: any;
 }
 
 export interface MessageRecord {

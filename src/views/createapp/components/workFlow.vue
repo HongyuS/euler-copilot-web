@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import '../../styles/workFlowArrange.scss';
 import { onMounted, ref, watch, onUnmounted } from 'vue';
-import { IconSuccess, IconError } from '@computing/opendesign-icons';
 import { useI18n } from 'vue-i18n';
 import { ElMessage } from 'element-plus';
-import { VueFlow, useVueFlow } from '@vue-flow/core';
+import { ConnectionMode, VueFlow, useVueFlow } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { MiniMap } from '@vue-flow/minimap';
 import BranchNode from './workFlowConfig/BranchNode.vue';
@@ -32,6 +31,7 @@ import { getSrcIcon, DefaultViewPortZoom } from './types';
 import $bus from 'src/bus/index';
 import CustomLoading from '../../customLoading/index.vue';
 import EditFlowName from './workFlowConfig/editFlowName.vue';
+import { useLangStore } from 'src/store';
 
 const { t } = useI18n();
 const copilotAside = ref<HTMLElement>();
@@ -53,7 +53,8 @@ const debugDialogVisible = ref(false);
 const apiServiceList = ref([]);
 const allApiServiceList = ref([]);
 const yamlContent = ref();
-const nodeYamlId = ref();
+const nodeYamlIds = ref();
+const nodeIds = ref();
 const emits = defineEmits(['updateFlowsDebug']);
 const route = useRoute();
 const workFlowList = ref([]);
@@ -70,6 +71,8 @@ const apiLoading = ref(false);
 const themeStore = useChangeThemeStore();
 const connectHandleNodeId = ref('');
 const updateFlowsDebugStatus = ref(false);
+const langStore = useLangStore();
+
 const hanleAsideVisible = () => {
   if (!copilotAside.value) return;
   if (isCopilotAsideVisible.value) {
@@ -94,6 +97,7 @@ const {
   setEdges,
   removeSelectedNodes,
   getSelectedNodes,
+  removeEdges,
 } = useVueFlow();
 const { layout } = useLayout();
 
@@ -134,9 +138,16 @@ onConnect((e) => {
   // 边的起点和终点节点的两个状态
   const sourceItem = findNode(e.source);
   const targetItem = findNode(e.target);
+
   // 获取当前状态
   const sourceStatus = sourceItem?.data?.status || 'default';
   const targetStatus = targetItem?.data?.status || 'default';
+
+  // 如果没有提供sourceHandle，但节点有activeSourceHandle，则使用它
+  if (!e.sourceHandle && sourceItem?.data?.activeSourceHandle) {
+    e.sourceHandle = sourceItem.data.activeSourceHandle;
+  }
+
   addEdges({
     ...e,
     data: {
@@ -211,12 +222,14 @@ const nodeAndLineConnection = () => {
   isNodeAndLineConnect.value = isNodeConnect;
 };
 // 编辑yaml
-const editYamlDrawer = (name, desc, yamlCode, nodeId) => {
+const editYamlDrawer = (name, desc, yamlCode, nodeYamlId, nodeId) => {
+  console.log('start', nodeId);
   yamlContent.value = yamlCode;
   nodeName.value = name;
   nodeDesc.value = desc;
   isEditYaml.value = true;
-  nodeYamlId.value = nodeId;
+  nodeIds.value = nodeId;
+  nodeYamlIds.value = nodeYamlId;
   // 编辑 yaml 时，需要debug 后才可发布
   emits('updateFlowsDebug', false);
 };
@@ -241,6 +254,7 @@ async function layoutGraph(direction) {
 
 // 拖拽添加
 const dropFunc = (e) => {
+  console.log('开始拖拽', e);
   if (!flowObj.value?.flowId) {
     ElMessage.warning(i18n.global.t('app.create_or_edit_workflow_first'));
     return;
@@ -258,6 +272,7 @@ onMounted(() => {
     .queryAllFlowService({
       page: 1,
       pageSize: 10,
+      language: langStore.language,
     })
     .then((res) => {
       apiServiceList.value = res[1]?.result.services;
@@ -331,7 +346,7 @@ const nodesChange = (nodes) => {
     removeSelectedNodes([getSelectedNodes.value[0]]);
   }
   if (nodes?.[0]?.type === 'remove') {
-    delNode(nodes[0].id);
+    // delNode(nodes[0].id);
     // 节点增加删除时直接将工作流debug状态置为false
     emits('updateFlowsDebug', false);
     nodeAndLineConnection();
@@ -463,7 +478,7 @@ const redrageFlow = (nodesList, edgesList) => {
         nodePosition: node.callId === 'start' ? 'Right' : 'Left',
       };
       newNode.deletable = false;
-    } else if (node.callId === 'choice') {
+    } else if (node.callId === 'Choice') {
       newNode.type = 'branch';
     } else {
       newNode.type = 'custom';
@@ -482,6 +497,7 @@ const redrageFlow = (nodesList, edgesList) => {
     // 线分支条件需后续添加
     return newEdge;
   });
+  console.log(newNodeList);
   setNodes(newNodeList);
   setEdges(newEdgeList);
   // 回显节点和边后，判断各节点连接状态
@@ -524,6 +540,7 @@ $bus.on('getNodesStatue', (item: any) => {
             params: newLines.data?.content,
             type: 'output',
           },
+          newLines.data,
         );
       } else {
         updateNodeFunc(
@@ -534,6 +551,7 @@ $bus.on('getNodesStatue', (item: any) => {
             params: newLines.data?.content,
             type: 'input',
           },
+          newLines.data,
         );
       }
     } else if (newLines?.data?.event === 'flow.stop') {
@@ -557,7 +575,7 @@ $bus.on('debugChatEnd', () => {
 });
 
 // 更新节点状态--调试到对应节点id，根据id设置节点与边状态
-const updateNodeFunc = (id, status, constTime, content?) => {
+const updateNodeFunc = (id, status, constTime, content?, resultData?) => {
   // 获取到当前的nodeId,更新状态
   const node = findNode(id);
   // 这里node的data也需要转换下
@@ -571,19 +589,50 @@ const updateNodeFunc = (id, status, constTime, content?) => {
   const changeTargetEdges = [
     ...getEdges.value.filter((item) => item.target === id),
   ];
-  // 分别遍历相应的以该节点为起源的边-并更新它们的状态为最新状态
-  changeSourceEdges.forEach((item) => {
-    updateEdgeData(item.id, { sourceStatus: status });
-  });
-  // 分别遍历相应相应的以该节点为目标的边-并更新它们的状态为最新状态
-  changeTargetEdges.forEach((item) => {
-    updateEdgeData(item.id, { targetStatus: status });
-  });
+  if (changeSourceEdges.length > 1) {
+    let branchId = resultData.content?.branch_id;
+    changeSourceEdges.forEach((item) => {
+      if (branchId === item.branchId) {
+        updateEdgeData(item.id, { sourceStatus: status, targetStatus: status });
+      }
+    });
+  } else {
+    // 分别遍历相应的以该节点为起源的边-并更新它们的状态为最新状态
+    changeSourceEdges.forEach((item) => {
+      updateEdgeData(item.id, { sourceStatus: status });
+    });
+  }
+  if (changeTargetEdges.length > 1) {
+    let branchId = resultData.content?.branch_id;
+    changeTargetEdges.forEach((item) => {
+      if (branchId === item.branchId) {
+        updateEdgeData(item.id, { targetStatus: status });
+      } else if (item.data.sourceStatus === 'success') {
+        // end的情况
+        updateEdgeData(item.id, { targetStatus: item.data.sourceStatus });
+      }
+    });
+  } else {
+    // 分别遍历相应相应的以该节点为目标的边-并更新它们的状态为最新状态
+    changeTargetEdges.forEach((item) => {
+      updateEdgeData(item.id, { targetStatus: status });
+    });
+  }
 };
 
-// 保存当前handle拖拽的nodeid--以便于拖拽结束时，设置该节点handle恢复默认状态
-const updateConnectHandle = (nodeId) => {
+// 保存当前handle拖拽的nodeid和sourceHandle--以便于拖拽结束时，设置该节点handle恢复默认状态
+const updateConnectHandle = (nodeId, sourceHandleId?) => {
   connectHandleNodeId.value = nodeId;
+  // 如果提供了sourceHandleId，保存它以便在onConnect中使用
+  if (sourceHandleId) {
+    // 可以在这里保存sourceHandleId，例如添加到节点数据中
+    const node = findNode(nodeId);
+    if (node) {
+      updateNode(nodeId, {
+        data: { ...node.data, activeSourceHandle: sourceHandleId },
+      });
+    }
+  }
 };
 
 // 这里是松开鼠标时[拖拽结束]-恢复不再拖拽的handle节点默认状态【对应的是customNode里拖拽节点设置状态】
@@ -593,8 +642,13 @@ const cancelConnectStatus = () => {
     const node = findNode(connectHandleNodeId.value);
     // 这里获取node的data
     const data = node?.data;
+    // 创建一个新的数据对象，不包含activeSourceHandle属性
+    let updatedData = { ...data };
+    if (updatedData && updatedData.activeSourceHandle) {
+      delete updatedData.activeSourceHandle;
+    }
     // 根据当前id，更新下data重新赋值，初始化节点状态和handle状态
-    updateNode(connectHandleNodeId.value, { data: { ...data } });
+    updateNode(connectHandleNodeId.value, { data: updatedData });
     // 将其置空
     connectHandleNodeId.value = '';
   }
@@ -608,7 +662,10 @@ const saveFlow = (updateNodeParameter?, debug?) => {
   }
   // 将对应的节点和边存储格式改造
   let updateNodes = getNodes.value.map((item) => {
+    console.log('node：', item);
+
     const { ...otherItem } = item.data;
+    console.log(item);
     let newItem = {
       enable: true,
       editable: false,
@@ -633,7 +690,7 @@ const saveFlow = (updateNodeParameter?, debug?) => {
       // 这里是需要将parameters
       newItem = {
         ...newItem,
-        callId: 'choice',
+        callId: 'Choice',
         parameters: item.data.parameters,
       };
     }
@@ -654,7 +711,7 @@ const saveFlow = (updateNodeParameter?, debug?) => {
   if (updateNodeParameter) {
     updateNodes.forEach((item) => {
       if (item.stepId === updateNodeParameter.id) {
-        if (item.type === 'choice') {
+        if (item.type === 'Choice') {
           item.parameters.input_parameters.choices =
             updateNodeParameter.inputStream;
         } else {
@@ -691,7 +748,10 @@ const saveFlow = (updateNodeParameter?, debug?) => {
       if (res[1]?.result) {
         queryFlow('update');
         const updatedCurFlow = res[1].result.flow;
-        isNodeConnect.value = res[1].result.connectivity;
+        isNodeConnect.value = res[1].result.flow.connectivity;
+        if (!isNodeConnect.value) {
+          ElMessage.error(i18n.global.t('semantic.check_connect'));
+        }
         redrageFlow(updatedCurFlow?.nodes, updatedCurFlow?.edges);
       }
       loading.value = false;
@@ -775,22 +835,23 @@ defineExpose({
                     :key="index"
                     :draggable="true"
                     @dragstart="
-                      onDragStart($event, node.type, {
+                      onDragStart($event, node.nodeId, {
                         serviceId: item.serviceId,
                         ...node,
                       })
                     "
                   >
                     <el-tooltip
-                    :disabled="true"
-                    class="popper-class"
-                    placement="top"
-                    :content="node.name">
-                        <div class="stancesName">
-                    <img class="nodeIcon" :src="getSrcIcon(node)" />
+                      :disabled="true"
+                      class="popper-class"
+                      placement="top"
+                      :content="node.name"
+                    >
+                      <div class="stancesName">
+                        <img class="nodeIcon" :src="getSrcIcon(node)" />
 
-                          {{ node.name }}
-                        </div>
+                        {{ node.name }}
+                      </div>
                     </el-tooltip>
                   </div>
                 </el-collapse-item>
@@ -807,6 +868,7 @@ defineExpose({
         :nodes="nodes"
         :edges="edges"
         :default-viewport="{ zoom: DefaultViewPortZoom }"
+        :connection-mode="ConnectionMode.Strict"
         :min-zoom="0.5"
         :max-zoom="4"
         class="my-diagram-class"
@@ -942,7 +1004,7 @@ defineExpose({
         <el-tooltip
           v-if="!isNodeAndLineConnect && !isNodeConnect"
           effect="dark"
-          :content="$t('semantic.publish_condition')"
+          :content="$t('semantic.check_connect')"
           placement="top"
         >
           <div class="debugBtn isDebugDis"></div>
@@ -957,7 +1019,9 @@ defineExpose({
         <!-- 这里显示调试最终结果与耗时 -->
         <div class="debugStatus" v-if="debugStatus">
           <div class="icon" :class="`${debugStatus}Icon`"></div>
-          <div class="resultText">{{ $t(`flow.${StatusInfoTitle[debugStatus]}`) }}</div>
+          <div class="resultText">
+            {{ $t(`flow.${StatusInfoTitle[debugStatus]}`) }}
+          </div>
           <span
             class="time"
             :class="`${debugStatus}Bg`"
@@ -1003,7 +1067,10 @@ defineExpose({
     :yamlContent="yamlContent"
     :nodeName="nodeName"
     :nodeDesc="nodeDesc"
-    :nodeYamlId="nodeYamlId"
+    :nodeYamlId="nodeYamlIds"
+    :nodeId="nodeIds"
+    :getEdges="getEdges"
+    :removeEdges="removeEdges"
   ></EditYamlDrawer>
 </template>
 <style lang="scss">

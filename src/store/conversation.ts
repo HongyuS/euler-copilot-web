@@ -51,12 +51,12 @@ export const useSessionStore = defineStore('conversation', () => {
 
   // #endregion
 
-  const { language } = useLangStore();
-
+  const langStore = useLangStore();
   // 是否暂停回答
   const isPaused = ref(false);
   // 会话列表
   const conversationList = ref<ConversationItem[]>([]);
+  const currentMessage = ref({});
   const app = ref<AppShowType>({
     appId: '',
     name: '',
@@ -65,6 +65,8 @@ export const useSessionStore = defineStore('conversation', () => {
   const appList = ref<Application[]>();
   // ai回复是否还在生成中
   const isAnswerGenerating = ref(false);
+
+  const currentTaskId = ref(null);
 
   // 方法集合 - 用于处理不同类型的event message
   const dataTransfers = {
@@ -85,7 +87,9 @@ export const useSessionStore = defineStore('conversation', () => {
       conversationItem: RobotConversationItem,
       message: Record<string, unknown>,
     ) => {
-      conversationItem.message[conversationItem.currentInd] += message.content;
+      if (!conversationItem.files) {
+        conversationItem.files = [];
+      }
       conversationItem.files = [...conversationItem.files, message.content];
     },
     suggestionFunc: (
@@ -143,7 +147,7 @@ export const useSessionStore = defineStore('conversation', () => {
       );
       if (target) {
         target.data.output = message.content;
-        target.status = flow.stepStatus;
+        target.status = 'success';
         // 工作流添加每阶段的时间耗时
         target['costTime'] = metadata.timeCost;
         if (flow.step_status === 'error' && conversationItem.flowdata) {
@@ -172,11 +176,12 @@ export const useSessionStore = defineStore('conversation', () => {
       } else if (content.type !== 'schema' && conversationItem.flowdata) {
         // 删除 end 逻辑
         conversationItem.flowdata = {
-          id: contentFlow.stepId,
-          title: i18n.global.t('flow.flow_end'),
-          progress: contentFlow.stepProgress,
-          status: 'success',
+          id: messageFlow.stepId,
+          title: currentTaskId ? i18n.global.t('flow.flow_start') : i18n.global.t('flow.flow_end'),
+          progress: messageFlow.stepProgress,
+          status: currentTaskId ? messageFlow.flowStatus : 'success',
           display: true,
+          taskId: currentTaskId.value,
           data: conversationItem.flowdata.data,
         };
       } else {
@@ -205,6 +210,81 @@ export const useSessionStore = defineStore('conversation', () => {
         $bus.emit('debugChatEnd');
       }
     },
+    waitingForStart: (
+      conversationItem: RobotConversationItem,
+      message: Record<string, unknown>,
+    ) => {
+      const flow = (message.flow || {}) as Record<string, string>;
+      const content = (message.content || {}) as Record<string, string>;
+      conversationItem.flowdata = {
+        id: flow.stepId,
+        title: flow.stepName,
+        status: flow.stepStatus,
+        taskId: currentTaskId,
+        data: {
+          exData: content,
+        },
+      };
+      if (conversationItem.flowdata) {
+        conversationItem.flowdata.progress = flow.stepProgress;
+        conversationItem.flowdata.status = flow.stepStatus;
+      }
+    },
+    waitingForParam: (
+      conversationItem: RobotConversationItem,
+      message: Record<string, unknown>,
+    ) => {
+      const flow = (message.flow || {}) as Record<string, string>;
+      const content = (message.content || {}) as Record<string, string>;
+      conversationItem.flowdata = {
+        id: flow.stepId,
+        title: flow.stepName,
+        status: flow.stepStatus,
+        taskId: currentTaskId,
+        data: {
+          exParam: content,
+        },
+      };
+      if (conversationItem.flowdata) {
+        conversationItem.flowdata.progress = flow.stepProgress;
+        conversationItem.flowdata.status = flow.stepStatus;
+      }
+    },
+    flowCancel: (
+      conversationItem: RobotConversationItem,
+      message: Record<string, unknown>,
+    ) => {
+      const content = (message.content || {}) as Record<string, unknown>;
+      const contentFlow = (content.flow || {}) as Record<string, string>;
+      const messageFlow = (message.flow || {}) as Record<string, string>;
+
+      // 取消运行
+      conversationItem.flowdata = {
+        id: contentFlow.stepId,
+        title: i18n.global.t('flow.flow_cancel'),
+        progress: contentFlow.stepProgress,
+        status: messageFlow.stepStatus,
+        display: true,
+        data: conversationItem?.flowdata?.data,
+      };
+    },
+    flowSuccess: (
+      conversationItem: RobotConversationItem,
+      message: Record<string, unknown>,
+      isFlowDebug: boolean,
+    ) => {
+      const content = (message.content || {}) as Record<string, unknown>;
+      const contentFlow = (content.flow || {}) as Record<string, string>;
+      const messageFlow = (message.flow || {}) as Record<string, string>;
+      conversationItem.flowdata = {
+        id: contentFlow.stepId,
+        title: i18n.global.t('flow.flow_end'),
+        progress: contentFlow.stepProgress,
+        status: 'success',
+        display: true,
+        data: conversationItem?.flowdata?.data,
+      };
+    },
   };
 
   // chat message回调
@@ -223,6 +303,10 @@ export const useSessionStore = defineStore('conversation', () => {
       dataTransfers.dataDone(conversationItem, !!params.type);
       return;
     }
+    if (rawMsgData === '[ERROR]') {
+      dataTransfers.dataDone(conversationItem, !!params.type);
+      return;
+    }
 
     // 同一时间戳传来的decodeValue是含有三条信息的合并，so需要分割
     // 这里json解析
@@ -231,9 +315,11 @@ export const useSessionStore = defineStore('conversation', () => {
     if ('metadata' in message) {
       conversationItem.metadata = message.metadata;
     }
+    currentTaskId.value = message.taskId;
     if ('event' in message) {
       switch (eventType) {
         case 'text.add':
+          currentMessage.value = message;
           dataTransfers.textAdd(conversationItem, message);
           break;
         case 'heartbeat':
@@ -243,7 +329,7 @@ export const useSessionStore = defineStore('conversation', () => {
           break;
         case 'document.add':
           // 遇到文档添加事件，先省略
-          // dataTransfers.documentAdd(conversationItem, message);
+          dataTransfers.documentAdd(conversationItem, message);
           break;
         case 'Suggestion':
           dataTransfers.suggestionFunc(conversationItem, message);
@@ -251,7 +337,7 @@ export const useSessionStore = defineStore('conversation', () => {
         case 'init':
           //初始化获取 metadata
           conversationItem.metadata = message.metadata;
-          conversationItem.createdAt = message.content.created_at;
+          conversationItem.createdAt = message.content.createdAt;
           conversationItem.groupId = message.groupId;
           break;
         case 'flow.start':
@@ -264,9 +350,25 @@ export const useSessionStore = defineStore('conversation', () => {
         case 'step.output':
           dataTransfers.stepOutput(conversationItem, message);
           break;
+        case 'step.waiting_for_start':
+          // 事件流等待开始
+          dataTransfers.waitingForStart(conversationItem, message);
+          break;
+        case 'step.waiting_for_param':
+          // 事件流等待参数
+          dataTransfers.waitingForParam(conversationItem, message);
+          break;
+        case 'flow.cancel':
+          // 事件流取消
+          dataTransfers.flowCancel(conversationItem, message);
+          break;
         case 'flow.stop':
           //时间流结束
           dataTransfers.flowStop(conversationItem, message, !!params.type);
+          break;
+        case 'flow.success':
+          //时间流结束
+          dataTransfers.flowSuccess(conversationItem, message, !!params.type);
           break;
         default:
           break;
@@ -299,7 +401,7 @@ export const useSessionStore = defineStore('conversation', () => {
             conversationId: params.conversationId,
             features: features,
             groupId: params.groupId,
-            language,
+            language: langStore.language,
             question: params.question,
             // record_id: params.qaRecordId,
           }),
@@ -318,6 +420,7 @@ export const useSessionStore = defineStore('conversation', () => {
           },
           conversationId: params.conversationId,
           debug: true,
+          language: langStore.language,
           question: params.question,
         }),
         openWhenHidden: true,
@@ -328,6 +431,7 @@ export const useSessionStore = defineStore('conversation', () => {
       params: Record<string, unknown>,
       innerParams: Record<string, unknown>,
       fetchParams: Record<string, unknown>,
+      isDebug: boolean,
     ) => {
       await fetchEventSource(url, {
         ...fetchParams,
@@ -338,9 +442,10 @@ export const useSessionStore = defineStore('conversation', () => {
             flowId: '',
             params: innerParams || {},
           },
+          ...(isDebug && { debug: isDebug }),
           conversationId: params.conversationId,
           features: features,
-          language,
+          language: langStore.language,
           groupId: params.groupId,
           question: params.question,
           record_id: params.qaRecordId,
@@ -366,10 +471,22 @@ export const useSessionStore = defineStore('conversation', () => {
           conversationId: params.conversationId,
           features: features,
           groupId: params.groupId,
-          language,
+          language: langStore.language,
           question: params.question,
           record_id: params.qaRecordId,
         }),
+        openWhenHidden: true,
+      });
+    },
+    fetchWait: async (
+      url: string,
+      params: Record<string, unknown>,
+      innerParams: Record<string, unknown>,
+      fetchParams: Record<string, unknown>,
+    ) => {
+      await fetchEventSource(url, {
+        ...fetchParams,
+        body: JSON.stringify({ taskId: currentTaskId.value, params: params }),
         openWhenHidden: true,
       });
     },
@@ -404,6 +521,8 @@ export const useSessionStore = defineStore('conversation', () => {
       type?: any;
     },
     ind?: number,
+    waitType?: string,
+    isDebug?: boolean,
   ): Promise<void> => {
     const { currentSelectedSession } = useHistorySessionStore();
     params.conversationId = currentSelectedSession;
@@ -449,15 +568,20 @@ export const useSessionStore = defineStore('conversation', () => {
           handleMsgDataShow(params, ev, conversationItem);
         },
       };
-
-      if (params.user_selected_flow) {
+      if(isDebug){
+        await funcFetch.fetchAppNew(streamUrl, params, pp, fetchParams, isDebug);
+      } else if (params.user_selected_flow) {
         // 之前的对话历史记录
         await funcFetch.fetchHistory(streamUrl, params, pp, fetchParams);
       } else if (params.user_selected_app) {
         // 新的工作流调试记录
         await funcFetch.fetchAppNew(streamUrl, params, pp, fetchParams);
-        // } else if (false) {
-        //   //写传参数情况
+      } else if (waitType) {
+        if (waitType === 'params') {
+          await funcFetch.fetchWait(streamUrl, params, pp, fetchParams);
+        } else {
+          await funcFetch.fetchWait(streamUrl, params.params, pp, fetchParams);
+        }
       } else {
         await funcFetch.fetchDefault(streamUrl, params, pp, fetchParams);
       }
@@ -507,6 +631,8 @@ export const useSessionStore = defineStore('conversation', () => {
    * @param user_selected_flow
    * @param params
    * @param type
+   * @param waitType
+   * @param isDebug
    */
   const sendQuestion = async (
     groupId: string | undefined,
@@ -517,6 +643,8 @@ export const useSessionStore = defineStore('conversation', () => {
     user_selected_flow?: string,
     params?: any,
     type?: any,
+    waitType?: string,
+    isDebug?: boolean,
   ): Promise<void> => {
     const { updateSessionTitle, currentSelectedSession } =
       useHistorySessionStore();
@@ -540,7 +668,7 @@ export const useSessionStore = defineStore('conversation', () => {
         comment: 'none',
       });
       targetItem.currentInd = targetItem.message.length - 1; //123
-    } else {
+    } else if (!waitType) {
       // 初次生成 ，创建一个问题和一个回答
       const ind = conversationList.value.length - 1;
       const messageList = new MessageArray();
@@ -589,7 +717,10 @@ export const useSessionStore = defineStore('conversation', () => {
         params: params || undefined,
       };
     }
-    await getStream(getStreamParams, regenerateInd ?? undefined);
+    if (waitType) {
+      getStreamParams = params;
+    }
+    await getStream(getStreamParams, regenerateInd ?? undefined, waitType, isDebug);
   };
 
   /**
@@ -608,7 +739,7 @@ export const useSessionStore = defineStore('conversation', () => {
     targetItem.message[0] += '暂停生成';
     targetItem.isFinish = true;
     cancel();
-    const resp = await api.stopGeneration();
+    const resp = await api.stopGeneration(currentMessage.value.taskId);
     if (resp?.[1]?.code === 200) {
       isAnswerGenerating.value = false;
     }
@@ -679,6 +810,21 @@ export const useSessionStore = defineStore('conversation', () => {
   // #endregion
 
   /**
+   * 处理历史对话数据中尾注位置
+   */
+  const handleMessage = (record: any): string => {
+    let message = record.content.answer;
+    record.metadata.footNoteMetadataList?.reverse().forEach((footNoteMetadata: any) => {
+      const insertFile = record.document?.filter((file: any) => file._id === footNoteMetadata.releatedId);
+      const insertNumber = insertFile[0]?.order;
+      if (!insertNumber) return;
+      const pos = footNoteMetadata.insertPosition;
+      message = message.slice(0, pos) + `[[${insertNumber}]]` + message.slice(pos)
+    });
+    return message;
+  }
+
+  /**
    * 获取历史对话数据
    * @param conversationId
    */
@@ -715,12 +861,12 @@ export const useSessionStore = defineStore('conversation', () => {
             cid: conversationList.value.length + 1,
             belong: 'user',
             message: record.content.question,
-            createdAt: record.created_at,
+            createdAt: record.createdAt,
           },
           {
             cid: conversationList.value.length + 2,
             belong: 'robot',
-            message: [record.content.answer],
+            message: [handleMessage(record)],
             messageList,
             currentInd: 0,
             isAgainst: false,
@@ -730,6 +876,7 @@ export const useSessionStore = defineStore('conversation', () => {
             conversationId: record.conversationId,
             groupId: record.groupId,
             metadata: record.metadata,
+            document: record.document,
             flowdata: record?.flow
               ? (generateFlowData(record.flow) as FlowType)
               : undefined,
@@ -744,22 +891,31 @@ export const useSessionStore = defineStore('conversation', () => {
   const generateFlowData = (record: any): FlowDataType => {
     const flowData = {
       id: record.recordId,
-      title: record.id,
-      status: 'success',
+      title: record.flowName,
+      status: record.flowStatus,
       display: true,
       flowId: record.flowId,
       data: [[]] as any[],
     };
+    // 看有没有取消的
+    let isCancelled = false;
     for (let i = 0; i < record.steps.length; i++) {
       flowData.data[0].push({
         id: record.steps[i].stepId,
-        title: record.steps[i].stepId,
+        title: record.steps[i].stepName,
         status: record.steps[i].stepStatus,
         data: {
           input: record.steps[i].input,
           output: record.steps[i].output,
+          ...(record.steps[i].exData && { exData: record.steps[i].exData }),
         },
       });
+      if (record.steps[i].stepStatus === 'cancelled') {
+        isCancelled = true;
+      }
+    }
+    if (isCancelled) {
+      flowData.status = 'cancelled';
     }
     return flowData;
   };
@@ -771,11 +927,11 @@ export const useSessionStore = defineStore('conversation', () => {
     isPaused.value = true;
     (
       conversationList.value[
-        conversationList.value.length - 1
+      conversationList.value.length - 1
       ] as RobotConversationItem
     ).isFinish = true;
     cancel();
-    const resp = await api.stopGeneration();
+    const resp = await api.stopGeneration(currentMessage.value.taskId);
     if (resp?.[1]?.code === 200) {
       isAnswerGenerating.value = false;
     }
@@ -792,6 +948,7 @@ export const useSessionStore = defineStore('conversation', () => {
     dialogueRef,
     app,
     appList,
+    currentMessage,
     sendQuestion,
     pausedStream,
     stopDebug,

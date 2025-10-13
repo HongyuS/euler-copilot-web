@@ -13,8 +13,9 @@ import {
 export const queryAllFlowService = (params: {
   page: number;
   pageSize: number;
+  language?: string | undefined;
 }): Promise<[any, FcResponse<unknown> | undefined]> => {
-  return get('/api/flow/service');
+  return get(`/api/flow/service?language=${params.language}`);
 };
 
 /**
@@ -64,10 +65,36 @@ export const delFlowTopology = (params: {
   return del(`/api/flow?appId=${params.appId}&flowId=${params.flowId}`);
 };
 
+/**
+ * 获取Choice节点内参数
+ * @param params
+ * @returns
+ */
+export const queryParameter = (params: {
+  appId: string;
+  flowId: string;
+  stepId: string;
+}): Promise<[any, FcResponse<unknown> | undefined]> => {
+  return get('/api/parameter', params);
+};
+
+/**
+ * 获取Choice节点内参数的操作内容
+ * @param params
+ * @returns
+ */
+export const queryParameterOperate = (params: {
+  ParamType: string;
+}): Promise<[any, FcResponse<unknown> | undefined]> => {
+  return get('/api/parameter/operate', params);
+};
+
 export const workFlowApi = {
   queryAllFlowService,
   querySingleFlowServiceNode,
   querySingleFlowTopology,
   delFlowTopology,
   createOrUpdateFlowTopology,
+  queryParameter,
+  queryParameterOperate,
 };
